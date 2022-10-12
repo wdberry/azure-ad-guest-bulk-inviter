@@ -1,0 +1,125 @@
+﻿@page "/"
+@using Microsoft.AspNetCore.Components.WebAssembly.Authentication
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.Graph
+@using System.Globalization
+@using CsvHelper
+@attribute [Authorize]
+@inject GraphServiceClient GraphClient
+
+<PageTitle>Azure AD B2B Bulk Guest Inviter</PageTitle>
+<div>
+<InputFile OnChange="@LoadFile" class="btn btn-primary" />
+</div>
+<div>
+@if (isLoading)
+{
+    <p>Uploading...</p>
+}
+else
+{
+    <FluentDataGrid id="inviteeGrid" RowsData=InviteeRowsGrid ColumnDefinitions=InviteeColumnsGrid Appearance="@Appearance.Accent" />
+}
+</div>
+@if (InviteeRowsGrid.Count > 0)
+{
+    <div>
+        <p>URL to redirect invitees to (Required): <FluentTextField @bind-Value="RedirectUrl" Required="true"></FluentTextField></p>
+    </div>
+    <div>
+        <p>Send invite email? <FluentCheckbox @bind-Value="SendInviteMessage"></FluentCheckbox></p>
+    </div>
+    <div>
+        <p>Custom invitation message: <FluentTextArea @bind-Value="InviteMessage"></FluentTextArea></p>
+    </div>
+    @if (RedirectUrl.Length > 0) {
+        @*<!-- Redirect URL is required for the invitation object, this is a hacky way to handle it before implementing a URL validation mechanism -->*@
+        <div>
+            <FluentButton disabled=@inviteBatchProcessing @onclick="() => InviteUsers()">Invite Users</FluentButton>
+        </div>
+    }
+}
+
+@code {
+
+    private bool isLoading;
+
+    private bool inviteBatchProcessing;
+
+    public record Invitee
+    {
+        public string Email { get; init; } = default!;
+        public string DisplayName { get; init; } = default!;
+        public bool Invited { get; set; } = false;
+    }
+
+    public List<Invitee> InviteeRowsGrid = new();
+
+    public List<ColumnDefinition<Invitee>> InviteeColumnsGrid = new();
+
+    private string RedirectUrl { get; set; } = "https://portal.azure.com";
+
+    private string InviteMessage { get; set; } = default!;
+
+    private bool SendInviteMessage { get; set; }
+
+    protected override void OnInitialized()
+    {
+        InviteeColumnsGrid.Add(new ColumnDefinition<Invitee>("Email", x => x.Email));
+        InviteeColumnsGrid.Add(new ColumnDefinition<Invitee>("Display Name", x => x.DisplayName ?? ""));
+        InviteeColumnsGrid.Add(new ColumnDefinition<Invitee>("Invited", x => x.Invited));
+    }
+
+    private async Task LoadFile(InputFileChangeEventArgs e)
+    {
+        isLoading = true;
+        var singleFile = e.File;
+        var config = new CsvHelper.Configuration.CsvConfiguration(CultureInfo.InvariantCulture)
+        {
+            HeaderValidated = null,
+            MissingFieldFound = null
+        };
+        using (var reader = new StreamReader(singleFile.OpenReadStream()))
+        using (var csv = new CsvReader(reader, config))
+        {
+            InviteeRowsGrid = await csv.GetRecordsAsync<Invitee>().ToListAsync();
+        }
+        isLoading = false;
+    }
+
+    private async Task InviteUsers()
+    {
+        inviteBatchProcessing = true;
+        foreach (Invitee i in InviteeRowsGrid) {
+            var invitation = new Invitation {
+                InvitedUserEmailAddress = i.Email,
+                InviteRedirectUrl = RedirectUrl,
+                SendInvitationMessage = SendInviteMessage
+            };
+            if (!string.IsNullOrWhiteSpace(InviteMessage) && SendInviteMessage)
+            {
+                invitation.InvitedUserMessageInfo = new InvitedUserMessageInfo {
+                    CustomizedMessageBody = InviteMessage
+                };
+            }
+            if (i.DisplayName.Length > 0)
+            {
+                invitation.InvitedUserDisplayName = i.DisplayName;
+            }
+
+             var user = await GraphClient.Invitations
+                .Request()
+                .AddAsync(invitation);
+            
+            if (user.InvitedUser.Id is string)
+            {
+                i.Invited = true;
+            }
+            
+            StateHasChanged();
+        }
+        inviteBatchProcessing = false;
+
+        StateHasChanged();
+    }
+}
